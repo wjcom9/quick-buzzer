@@ -2,6 +2,14 @@ const socket = io();
 const root = document.querySelector("#app");
 const TEAM_NAMES = ["南万党支部先锋一队","南万党支部先锋二队","南万党支部先锋三队","南万党支部先锋四队","南万党支部先锋五队","南万党支部先锋六队","南万党支部先锋七队","柳万党支部队","桂万党支部队"];
 let tab = "join", session = null, room = null, error = "", loading = false, copied = false, historyOpen = false;
+let countdownSnapshotSeconds = 0, countdownSnapshotAt = performance.now();
+function acceptRoom(next) {
+  room = next;
+  countdownSnapshotAt = performance.now();
+  countdownSnapshotSeconds = next?.room?.status === "countdown"
+    ? Math.max(0, (next.room.countdownEndsAt - next.room.serverNow) / 1000)
+    : 0;
+}
 const formDrafts = { join: { code: "", teamName: "" }, create: { hostName: "", password: "" }, recover: { code: "", password: "" } };
 const esc = value => String(value ?? "").replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const logo = () => '<div class="logo" aria-label="极速抢答"><span>⚡</span> 极速抢答</div>';
@@ -53,13 +61,13 @@ async function submitEntry(event) {
   try {
     if (tab === "create") {
       const result = await emit("create-room", { password: data.password, hostName: data.hostName });
-      session = { role: "host", code: result.code, token: result.hostToken, hostName: data.hostName || "" }; room = result.state;
+      session = { role: "host", code: result.code, token: result.hostToken, hostName: data.hostName || "" }; acceptRoom(result.state);
     } else if (tab === "recover") {
       const result = await emit("recover-host", { code: data.code, password: data.password });
-      session = { role: "host", code: result.code, token: result.hostToken, hostName: result.hostName || "" }; room = result.state;
+      session = { role: "host", code: result.code, token: result.hostToken, hostName: result.hostName || "" }; acceptRoom(result.state);
     } else {
       const result = await emit("join-room", { code: data.code, teamName: data.teamName });
-      session = { role: "player", code: result.code, token: result.playerToken, teamName: result.teamName, participantId: result.participantId }; room = result.state;
+      session = { role: "player", code: result.code, token: result.playerToken, teamName: result.teamName, participantId: result.participantId }; acceptRoom(result.state);
     }
     formDrafts[tab] = tab === "join" ? { code: "", teamName: "" } : tab === "create" ? { hostName: "", password: "" } : { code: "", password: "" };
     saveSession();
@@ -114,8 +122,9 @@ const pendingPlayers = () => room.participants.filter(player => player.approvalS
 
 function managementPanel() {
   const pending = pendingPlayers(), approved = approvedPlayers();
-  const pendingRows = pending.length ? pending.map(player => `<div class="member-row pending-row"><div><b>${esc(player.teamName)}</b><small>${player.connected ? "在线等待" : "暂时离线"}</small></div><div class="member-actions"><button class="approve" data-action="approve" data-participant-id="${player.id}">批准</button><button class="kick" data-action="kick" data-participant-id="${player.id}">移除</button></div></div>`).join("") : '<p class="no-members">暂无待审核队伍</p>';
-  const approvedRows = approved.length ? approved.map(player => `<div class="member-row"><div><b>${esc(player.teamName)}</b><small>${player.connected ? "● 在线" : "○ 离线"}</small></div><button class="kick" data-action="kick" data-participant-id="${player.id}">踢出</button></div>`).join("") : '<p class="no-members">尚未批准队伍</p>';
+  const presence = player => `<small class="presence ${player.connected ? "is-online" : "is-offline"}"><i></i>${player.connected ? "在线" : "离线"}</small>`;
+  const pendingRows = pending.length ? pending.map(player => `<div class="member-row pending-row"><div><b>${esc(player.teamName)}</b>${presence(player)}</div><div class="member-actions"><button class="approve" data-action="approve" data-participant-id="${player.id}">批准</button><button class="kick" data-action="kick" data-participant-id="${player.id}">移除</button></div></div>`).join("") : '<p class="no-members">暂无待审核队伍</p>';
+  const approvedRows = approved.length ? approved.map(player => `<div class="member-row"><div><b>${esc(player.teamName)}</b>${presence(player)}</div><button class="kick" data-action="kick" data-participant-id="${player.id}">踢出</button></div>`).join("") : '<p class="no-members">尚未批准队伍</p>';
   return `<section class="manage-panel"><div class="manage-title"><h2>成员审核</h2>${pending.length ? `<span>${pending.length} 个待处理</span>` : ""}</div><h3>待审核</h3>${pendingRows}<h3>正式队伍</h3>${approvedRows}</section>`;
 }
 
@@ -133,7 +142,8 @@ function historyModal() {
 
 function countdownValue() {
   if (room?.room.status !== "countdown" || !room.room.countdownEndsAt) return 0;
-  return Math.max(0, Math.ceil((room.room.countdownEndsAt - Date.now()) / 1000));
+  const elapsed = (performance.now() - countdownSnapshotAt) / 1000;
+  return Math.max(0, Math.ceil(countdownSnapshotSeconds - elapsed));
 }
 function updateCountdownDisplay() {
   if (room?.room.status !== "countdown") return;
@@ -163,24 +173,24 @@ function ranking() {
   return room.buzzes.map((item, index) => `<div class="rank ${index === 0 ? "winner" : ""}"><b>${index + 1}</b><span>${esc(item.teamName)}${item.participantId === session.participantId ? "<small>（本队）</small>" : ""}</span><time>${index === 0 ? "最先抢答" : `+${((item.buzzedAt - first)/1000).toFixed(3)}s`}</time></div>`).join("");
 }
 
-async function hostAction(action, participantId) { try { const countdownSeconds = root.querySelector("#countdown-seconds")?.value; const result = await emit("host-action", { action, participantId, countdownSeconds, code: session.code, token: session.token }); room = result.state; error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
-async function buzz() { try { const result = await emit("buzz", { code: session.code, token: session.token }); room = result.state; error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
+async function hostAction(action, participantId) { try { const countdownSeconds = root.querySelector("#countdown-seconds")?.value; const result = await emit("host-action", { action, participantId, countdownSeconds, code: session.code, token: session.token }); acceptRoom(result.state); error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
+async function buzz() { try { const result = await emit("buzz", { code: session.code, token: session.token }); acceptRoom(result.state); error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
 function render() { if (session && room) { syncHistory(room); roomPage(); } else landing(); }
 
 socket.on("room-state", next => {
-  const wasOpen = room?.room.status === "open"; room = next; error = "";
+  const wasOpen = room?.room.status === "open"; acceptRoom(next); error = "";
   if (session?.role === "player" && !currentPlayer()) { session = null; room = null; saveSession(); error = "你的队伍已被主持人移出房间"; return landing(); }
   if (session?.role === "player" && !wasOpen && next.room.status === "open" && currentPlayer()?.approvalStatus === "approved") navigator.vibrate?.(120);
   render();
 });
 socket.on("kicked", payload => { session = null; room = null; saveSession(); error = payload?.message || "你的队伍已被移出房间"; landing(); });
 socket.on("disconnect", () => { if (session) { error = "正在重新连接…"; render(); } });
-socket.on("connect", async () => { if (!session) return; try { const result = await emit("resume", session); room = result.state; error = ""; render(); } catch { session = null; room = null; saveSession(); landing(); } });
+socket.on("connect", async () => { if (!session) return; try { const result = await emit("resume", session); acceptRoom(result.state); error = ""; render(); } catch { session = null; room = null; saveSession(); landing(); } });
 window.addEventListener("keydown", event => { if (event.key === "Escape" && historyOpen) { closeHistory(); return; } if (event.code === "Space" && session?.role === "player" && currentPlayer()?.approvalStatus === "approved" && room?.room.status === "open" && !["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName)) { event.preventDefault(); buzz(); } });
 try {
   session = JSON.parse(localStorage.getItem("buzzer-session") || sessionStorage.getItem("buzzer-session"));
   if (session) saveSession();
 } catch { session = null; }
 render();
-if (session && socket.connected) socket.emit("resume", session, result => { if (result?.ok) { room = result.state; error = ""; render(); } else { session = null; saveSession(); landing(); } });
+if (session && socket.connected) socket.emit("resume", session, result => { if (result?.ok) { acceptRoom(result.state); error = ""; render(); } else { session = null; saveSession(); landing(); } });
 setInterval(() => { if (session && socket.connected) socket.emit("keepalive", { code: session.code }, () => {}); }, 5 * 60 * 1000);

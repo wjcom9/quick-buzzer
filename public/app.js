@@ -38,21 +38,34 @@ async function submitEntry(event) {
   try {
     if (tab === "create") {
       const result = await emit("create-room", { password: data.password });
-      session = { role: "host", code: result.code, token: result.hostToken }; room = result.state;
+      session = { role: "host", code: result.code, token: result.hostToken, password: data.password }; room = result.state;
     } else {
       const result = await emit("join-room", { code: data.code, teamName: data.teamName, password: data.password });
       session = { role: "player", code: result.code, token: result.playerToken, teamName: result.teamName, participantId: result.participantId }; room = result.state;
     }
-    saveSession(); render();
-  } catch (reason) { error = reason.message; landing(); }
-  finally { loading = false; }
+    saveSession();
+  } catch (reason) {
+    error = reason.message;
+  } finally {
+    loading = false;
+    render();
+  }
 }
 
 function currentPlayer() { return room?.participants.find(item => item.id === session?.participantId); }
-function pageHeader() { return `<header>${logo()}<div class="room-meta"><span>房间</span><strong>${esc(session.code)}</strong><button id="copy">${copied ? "已复制" : "复制"}</button><button class="leave" id="leave">退出</button></div></header>`; }
+function pageHeader() {
+  const copyLabel = copied ? "已复制" : session.role === "host" ? "复制邀请信息" : "复制房间号";
+  return `<header>${logo()}<div class="room-meta"><span>房间</span><strong>${esc(session.code)}</strong><button id="copy">${copyLabel}</button><button class="leave" id="leave">退出</button></div></header>`;
+}
 function bindHeader() {
   root.querySelector("#leave").onclick = () => { session = null; room = null; error = ""; saveSession(); landing(); };
-  root.querySelector("#copy").onclick = async () => { await navigator.clipboard.writeText(`房间号：${session.code}`); copied = true; render(); setTimeout(() => { copied = false; if (session) render(); }, 1500); };
+  root.querySelector("#copy").onclick = async () => {
+    const inviteText = session.role === "host"
+      ? `房间号:${session.code}\n密码:${session.password || "（请填写创建时设置的密码）"}\n请访问 https://quick-buzzer.onrender.com/ 加入吧！`
+      : `房间号:${session.code}\n请访问 https://quick-buzzer.onrender.com/ 加入吧！`;
+    await navigator.clipboard.writeText(inviteText);
+    copied = true; render(); setTimeout(() => { copied = false; if (session) render(); }, 1500);
+  };
 }
 
 function pendingPage() {

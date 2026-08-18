@@ -41,14 +41,14 @@ const channel = code => `room:${code}`;
 
 function state(room) {
   return {
-    room: { code: room.code, status: room.status, round: room.round, createdAt: room.createdAt },
+    room: { code: room.code, status: room.status, round: room.round, createdAt: room.createdAt, hostName: room.hostName, hostConnected: room.hostConnected, countdownEndsAt: room.countdownEndsAt || null, countdownSeconds: room.countdownSeconds || null, serverNow: Date.now() },
     participants: [...room.participants.values()].map(({ id, teamName, joinedAt, connected, approvalStatus }) => ({ id, teamName, joinedAt, connected, approvalStatus })),
     buzzes: room.buzzes.map(({ participantId, teamName, buzzedAt }) => ({ participantId, teamName, buzzedAt })),
     history: room.history.map(item => ({ round: item.round, endedAt: item.endedAt, buzzes: item.buzzes.map(buzz => ({ ...buzz })) })),
   };
 }
 
-function emitState(room) { io.to(channel(room.code)).emit("room-state", state(room)); }
+function emitState(room) { room.lastActive = Date.now(); io.to(channel(room.code)).emit("room-state", state(room)); }
 function fail(ack, error) { ack?.({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 function hostFor(room, token) {
   if (!token) return false;
@@ -60,16 +60,33 @@ function archiveRound(room) {
   if (room.history.some(item => item.round === room.round)) return;
   room.history.push({ round: room.round, endedAt: Date.now(), buzzes: room.buzzes.map(item => ({ ...item })) });
 }
+function cancelCountdown(room) {
+  if (room.countdownTimer) clearTimeout(room.countdownTimer);
+  room.countdownTimer = null; room.countdownEndsAt = null; room.countdownSeconds = null;
+}
+function beginCountdown(room, seconds) {
+  cancelCountdown(room);
+  room.status = "countdown"; room.countdownSeconds = seconds; room.countdownEndsAt = Date.now() + seconds * 1000;
+  const expectedEnd = room.countdownEndsAt;
+  room.countdownTimer = setTimeout(() => {
+    if (rooms.get(room.code) !== room || room.status !== "countdown" || room.countdownEndsAt !== expectedEnd) return;
+    room.status = "open"; room.countdownTimer = null; room.countdownEndsAt = null;
+    emitState(room);
+  }, seconds * 1000);
+  room.countdownTimer.unref();
+}
 
 io.on("connection", socket => {
   socket.on("create-room", (payload = {}, ack) => {
     try {
       const password = String(payload.password || "");
-      if (password.length < 4 || password.length > 20) throw new Error("密码需为 4–20 位");
+      const hostName = String(payload.hostName || "").trim().slice(0, 30);
+      if (password.length < 4 || password.length > 20) throw new Error("主持密码需为 4–20 位");
       const code = roomCode();
       const room = {
-        code, passwordHash: hashPassword(password), hostToken: makeToken(), hostSocketId: socket.id,
-        status: "waiting", round: 1, createdAt: Date.now(), participants: new Map(), buzzes: [], history: [], nextParticipantId: 1,
+        code, passwordHash: hashPassword(password), hostToken: makeToken(), hostSocketId: socket.id, hostConnected: true, hostName,
+        status: "waiting", round: 1, createdAt: Date.now(), lastActive: Date.now(), participants: new Map(), buzzes: [], history: [], nextParticipantId: 1,
+        countdownTimer: null, countdownEndsAt: null, countdownSeconds: null,
       };
       rooms.set(code, room); socket.join(channel(code)); socket.data.session = { code, role: "host", token: room.hostToken };
       ack?.({ ok: true, code, hostToken: room.hostToken, state: state(room) });
@@ -79,11 +96,9 @@ io.on("connection", socket => {
   socket.on("join-room", (payload = {}, ack) => {
     try {
       const code = String(payload.code || "").trim().toUpperCase();
-      const password = String(payload.password || "");
       const teamName = String(payload.teamName || "").trim();
       const room = rooms.get(code);
       if (!room) throw new Error("找不到这个房间");
-      if (room.passwordHash !== hashPassword(password)) throw new Error("房间密码不正确");
       if (!TEAM_NAMES.has(teamName)) throw new Error("请选择有效的队名");
       if ([...room.participants.values()].some(player => player.teamName === teamName)) throw new Error("该队伍已经申请加入房间");
       const participant = {
@@ -97,12 +112,26 @@ io.on("connection", socket => {
     } catch (error) { fail(ack, error); }
   });
 
+  socket.on("recover-host", (payload = {}, ack) => {
+    try {
+      const code = String(payload.code || "").trim().toUpperCase();
+      const password = String(payload.password || "");
+      const room = rooms.get(code);
+      if (!room) throw new Error("找不到这个房间");
+      if (room.passwordHash !== hashPassword(password)) throw new Error("主持密码不正确");
+      room.hostToken = makeToken(); room.hostSocketId = socket.id; room.hostConnected = true;
+      socket.join(channel(code)); socket.data.session = { code, role: "host", token: room.hostToken };
+      ack?.({ ok: true, code, hostToken: room.hostToken, hostName: room.hostName, state: state(room) });
+      emitState(room);
+    } catch (error) { fail(ack, error); }
+  });
+
   socket.on("resume", (payload = {}, ack) => {
     try {
       const code = String(payload.code || "").toUpperCase(); const room = rooms.get(code);
       if (!room) throw new Error("房间已结束");
       if (payload.role === "host" && hostFor(room, payload.token)) {
-        room.hostSocketId = socket.id; socket.join(channel(code)); socket.data.session = { code, role: "host", token: room.hostToken };
+        room.hostSocketId = socket.id; room.hostConnected = true; socket.join(channel(code)); socket.data.session = { code, role: "host", token: room.hostToken };
         return ack?.({ ok: true, state: state(room) });
       }
       const player = playerFor(room, payload.token);
@@ -132,10 +161,17 @@ io.on("connection", socket => {
       } else if (payload.action === "start") {
         const approvedOnline = [...room.participants.values()].some(player => player.approvalStatus === "approved" && player.connected);
         if (!approvedOnline) throw new Error("请先批准至少一支在线队伍");
+        const countdownSeconds = Math.max(1, Math.min(60, Number.parseInt(payload.countdownSeconds, 10) || 3));
         if (room.status === "open") archiveRound(room);
-        if (room.status !== "waiting") room.round += 1; room.buzzes = []; room.status = "open";
-      } else if (payload.action === "close") { if (room.status === "open") archiveRound(room); room.status = "closed"; }
-      else if (payload.action === "reset") { if (room.status === "open") archiveRound(room); room.round += 1; room.buzzes = []; room.status = "waiting"; }
+        if (room.status !== "waiting") room.round += 1;
+        room.buzzes = []; beginCountdown(room, countdownSeconds);
+      } else if (payload.action === "close") {
+        if (room.status === "open") archiveRound(room);
+        cancelCountdown(room); room.status = "closed";
+      } else if (payload.action === "reset") {
+        if (room.status === "open") archiveRound(room);
+        cancelCountdown(room); room.round += 1; room.buzzes = []; room.status = "waiting";
+      }
       else throw new Error("未知操作");
       emitState(room); ack?.({ ok: true, state: state(room) });
     } catch (error) { fail(ack, error); }
@@ -155,7 +191,11 @@ io.on("connection", socket => {
     } catch (error) { fail(ack, error); }
   });
 
-  socket.on("keepalive", (_payload, ack) => ack?.({ ok: true, at: Date.now() }));
+  socket.on("keepalive", (payload = {}, ack) => {
+    const room = rooms.get(String(payload.code || "").toUpperCase());
+    if (room) room.lastActive = Date.now();
+    ack?.({ ok: true, at: Date.now() });
+  });
 
   socket.on("disconnect", () => {
     const session = socket.data.session; if (!session) return;
@@ -163,20 +203,15 @@ io.on("connection", socket => {
     if (session.role === "player") {
       const player = room.participants.get(session.participantId);
       if (player && player.socketId === socket.id) { player.connected = false; player.socketId = null; emitState(room); }
+    } else if (room.hostSocketId === socket.id) {
+      room.hostConnected = false; room.hostSocketId = null; emitState(room);
     }
-    setTimeout(() => {
-      const current = rooms.get(session.code); if (!current) return;
-      if (session.role === "player") {
-        const player = current.participants.get(session.participantId);
-        if (player && !player.connected) { current.participants.delete(player.id); emitState(current); }
-      } else if (!current.hostSocketId || current.hostSocketId === socket.id) rooms.delete(session.code);
-    }, 120000).unref();
   });
 });
 
 setInterval(() => {
   const cutoff = Date.now() - 6 * 60 * 60 * 1000;
-  for (const [code, room] of rooms) if (room.createdAt < cutoff) rooms.delete(code);
+  for (const [code, room] of rooms) if ((room.lastActive || room.createdAt) < cutoff) { cancelCountdown(room); rooms.delete(code); }
 }, 30 * 60 * 1000).unref();
 
 const port = Number(process.env.PORT || 3000);

@@ -85,7 +85,11 @@ function pageHeader(showHistory = false) {
   return `<header>${logo()}<div class="room-meta"><span>房间</span><strong>${esc(session.code)}</strong>${showHistory ? '<button id="history-toggle" class="history-toggle">轮次记录</button>' : ""}<button id="copy">${copyLabel}</button><button class="leave" id="leave">退出</button></div></header>`;
 }
 function bindHeader() {
-  root.querySelector("#leave").onclick = () => { historyOpen = false; session = null; room = null; error = ""; saveSession(); landing(); };
+  root.querySelector("#leave").onclick = () => {
+    const leavingSession = session ? { ...session } : null;
+    historyOpen = false; session = null; room = null; error = ""; saveSession(); landing();
+    if (leavingSession && socket.connected) socket.timeout(2000).emit("leave-room", leavingSession, () => {});
+  };
   root.querySelector("#history-toggle")?.addEventListener("click", () => { historyOpen = true; render(); });
   root.querySelector("#copy").onclick = async () => {
     const inviteText = `房间号:${session.code}\n请访问 https://quick-buzzer.onrender.com/ 加入吧！`;

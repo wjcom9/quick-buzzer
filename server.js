@@ -193,6 +193,28 @@ io.on("connection", socket => {
     } catch (error) { fail(ack, error); }
   });
 
+  socket.on("leave-room", (payload = {}, ack) => {
+    try {
+      const code = String(payload.code || "").toUpperCase();
+      const room = rooms.get(code);
+      if (!room) return ack?.({ ok: true });
+      if (payload.role === "host") {
+        if (!hostFor(room, payload.token)) throw new Error("主持人身份已失效");
+        if (room.hostSocketId === socket.id) room.hostSocketId = null;
+        room.hostConnected = false;
+      } else {
+        const player = playerFor(room, payload.token);
+        if (!player) return ack?.({ ok: true });
+        room.participants.delete(player.id);
+        room.buzzes = room.buzzes.filter(item => item.participantId !== player.id);
+      }
+      socket.leave(channel(code));
+      socket.data.session = null;
+      emitState(room);
+      ack?.({ ok: true });
+    } catch (error) { fail(ack, error); }
+  });
+
   socket.on("keepalive", (payload = {}, ack) => {
     const room = rooms.get(String(payload.code || "").toUpperCase());
     if (room) room.lastActive = Date.now();

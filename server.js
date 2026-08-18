@@ -44,6 +44,7 @@ function state(room) {
     room: { code: room.code, status: room.status, round: room.round, createdAt: room.createdAt },
     participants: [...room.participants.values()].map(({ id, teamName, joinedAt, connected, approvalStatus }) => ({ id, teamName, joinedAt, connected, approvalStatus })),
     buzzes: room.buzzes.map(({ participantId, teamName, buzzedAt }) => ({ participantId, teamName, buzzedAt })),
+    history: room.history.map(item => ({ round: item.round, endedAt: item.endedAt, buzzes: item.buzzes.map(buzz => ({ ...buzz })) })),
   };
 }
 
@@ -55,6 +56,10 @@ function hostFor(room, token) {
   return crypto.timingSafeEqual(Buffer.from(room.hostToken), supplied);
 }
 function playerFor(room, token) { return [...room.participants.values()].find(player => player.token === token); }
+function archiveRound(room) {
+  if (room.history.some(item => item.round === room.round)) return;
+  room.history.push({ round: room.round, endedAt: Date.now(), buzzes: room.buzzes.map(item => ({ ...item })) });
+}
 
 io.on("connection", socket => {
   socket.on("create-room", (payload = {}, ack) => {
@@ -64,7 +69,7 @@ io.on("connection", socket => {
       const code = roomCode();
       const room = {
         code, passwordHash: hashPassword(password), hostToken: makeToken(), hostSocketId: socket.id,
-        status: "waiting", round: 1, createdAt: Date.now(), participants: new Map(), buzzes: [], nextParticipantId: 1,
+        status: "waiting", round: 1, createdAt: Date.now(), participants: new Map(), buzzes: [], history: [], nextParticipantId: 1,
       };
       rooms.set(code, room); socket.join(channel(code)); socket.data.session = { code, role: "host", token: room.hostToken };
       ack?.({ ok: true, code, hostToken: room.hostToken, state: state(room) });
@@ -127,9 +132,10 @@ io.on("connection", socket => {
       } else if (payload.action === "start") {
         const approvedOnline = [...room.participants.values()].some(player => player.approvalStatus === "approved" && player.connected);
         if (!approvedOnline) throw new Error("请先批准至少一支在线队伍");
+        if (room.status === "open") archiveRound(room);
         if (room.status !== "waiting") room.round += 1; room.buzzes = []; room.status = "open";
-      } else if (payload.action === "close") room.status = "closed";
-      else if (payload.action === "reset") { room.round += 1; room.buzzes = []; room.status = "waiting"; }
+      } else if (payload.action === "close") { if (room.status === "open") archiveRound(room); room.status = "closed"; }
+      else if (payload.action === "reset") { if (room.status === "open") archiveRound(room); room.round += 1; room.buzzes = []; room.status = "waiting"; }
       else throw new Error("未知操作");
       emitState(room); ack?.({ ok: true, state: state(room) });
     } catch (error) { fail(ack, error); }
@@ -148,6 +154,8 @@ io.on("connection", socket => {
       emitState(room); ack?.({ ok: true, state: state(room) });
     } catch (error) { fail(ack, error); }
   });
+
+  socket.on("keepalive", (_payload, ack) => ack?.({ ok: true, at: Date.now() }));
 
   socket.on("disconnect", () => {
     const session = socket.data.session; if (!session) return;

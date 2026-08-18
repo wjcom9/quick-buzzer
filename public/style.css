@@ -26,3 +26,8 @@
 .countdown-buzzer{border-color:#ffd0c4;background:#fff5f1;color:var(--orange);box-shadow:0 10px 0 #e9c1b8,0 24px 40px #4d43301f}
 .countdown-buzzer span{font-size:72px;letter-spacing:0}.host-offline{color:#93620d;background:#fff4d8;border:1px solid #f1d58f;padding:10px 14px;border-radius:10px}
 @media(max-width:600px){.tabs button{font-size:12px}.countdown-setting{margin-top:20px}.countdown-number{font-size:120px}.countdown-buzzer span{font-size:64px}}
+
+.presence{display:inline-flex!important;align-items:center;gap:6px;margin-top:5px;font-weight:700}
+.presence i{display:inline-block;width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.presence.is-online{color:#188653!important}.presence.is-online i{background:#22a968;box-shadow:0 0 0 3px #22a9681f}
+.presence.is-offline{color:#929292!important}.presence.is-offline i{background:#a7a7a7;box-shadow:0 0 0 3px #a7a7a71f}

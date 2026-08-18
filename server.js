@@ -100,12 +100,14 @@ io.on("connection", socket => {
       const room = rooms.get(code);
       if (!room) throw new Error("找不到这个房间");
       if (!TEAM_NAMES.has(teamName)) throw new Error("请选择有效的队名");
-      if ([...room.participants.values()].some(player => player.teamName === teamName)) throw new Error("该队伍已经申请加入房间");
-      const participant = {
-        id: room.nextParticipantId++, teamName, token: makeToken(), joinedAt: Date.now(), connected: true,
-        socketId: socket.id, approvalStatus: "pending",
+      const existing = [...room.participants.values()].find(player => player.teamName === teamName);
+      if (existing?.connected) throw new Error("该队伍当前在线，不能重复加入");
+      const participant = existing || {
+        id: room.nextParticipantId++, teamName, joinedAt: Date.now(), approvalStatus: "pending",
       };
-      room.participants.set(participant.id, participant); socket.join(channel(code));
+      participant.token = makeToken(); participant.connected = true; participant.socketId = socket.id;
+      if (!existing) room.participants.set(participant.id, participant);
+      socket.join(channel(code));
       socket.data.session = { code, role: "player", token: participant.token, participantId: participant.id };
       ack?.({ ok: true, code, teamName, playerToken: participant.token, participantId: participant.id, state: state(room) });
       emitState(room);

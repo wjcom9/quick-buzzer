@@ -1,7 +1,7 @@
 const socket = io();
 const root = document.querySelector("#app");
 const TEAM_NAMES = ["南万党支部先锋一队","南万党支部先锋二队","南万党支部先锋三队","南万党支部先锋四队","南万党支部先锋五队","南万党支部先锋六队","南万党支部先锋七队","柳万党支部队","桂万党支部队"];
-let tab = "join", session = null, room = null, error = "", loading = false, copied = false;
+let tab = "join", session = null, room = null, error = "", loading = false, copied = false, historyOpen = false;
 const esc = value => String(value ?? "").replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const logo = () => '<div class="logo" aria-label="极速抢答"><span>⚡</span> 极速抢答</div>';
 const emit = (event, payload) => new Promise((resolve, reject) => socket.emit(event, payload, response => response?.ok ? resolve(response) : reject(new Error(response?.error || "操作失败"))));
@@ -53,12 +53,13 @@ async function submitEntry(event) {
 }
 
 function currentPlayer() { return room?.participants.find(item => item.id === session?.participantId); }
-function pageHeader() {
+function pageHeader(showHistory = false) {
   const copyLabel = copied ? "已复制" : session.role === "host" ? "复制邀请信息" : "复制房间号";
-  return `<header>${logo()}<div class="room-meta"><span>房间</span><strong>${esc(session.code)}</strong><button id="copy">${copyLabel}</button><button class="leave" id="leave">退出</button></div></header>`;
+  return `<header>${logo()}<div class="room-meta"><span>房间</span><strong>${esc(session.code)}</strong>${showHistory ? '<button id="history-toggle" class="history-toggle">轮次记录</button>' : ""}<button id="copy">${copyLabel}</button><button class="leave" id="leave">退出</button></div></header>`;
 }
 function bindHeader() {
-  root.querySelector("#leave").onclick = () => { session = null; room = null; error = ""; saveSession(); landing(); };
+  root.querySelector("#leave").onclick = () => { historyOpen = false; session = null; room = null; error = ""; saveSession(); landing(); };
+  root.querySelector("#history-toggle")?.addEventListener("click", () => { historyOpen = true; render(); });
   root.querySelector("#copy").onclick = async () => {
     const inviteText = session.role === "host"
       ? `房间号:${session.code}\n密码:${session.password || "（请填写创建时设置的密码）"}\n请访问 https://quick-buzzer.onrender.com/ 加入吧！`
@@ -79,12 +80,14 @@ function roomPage() {
   if (!host && currentPlayer()?.approvalStatus !== "approved") return pendingPage();
   const myRank = host ? -1 : room.buzzes.findIndex(item => item.participantId === session.participantId);
   const statusText = status === "open" ? "抢答进行中" : status === "closed" ? "本轮已结束" : "等待主持人开始";
-  root.innerHTML = `<main class="room-page">${pageHeader()}<div class="status ${status}"><i></i>${statusText}<span>第 ${room?.room.round || 1} 轮</span></div>${error ? `<div class="room-error">${esc(error)}</div>` : ""}
-  <section class="room-grid"><div class="stage">${host ? hostStage(status) : playerStage(status, myRank)}</div><aside>${host ? managementPanel() : ""}${historyPanel()}<div class="panel-head"><h2>本轮实时排名</h2><span>${room?.buzzes.length || 0} 队已抢答</span></div>
-  <div class="ranking">${ranking()}</div><div class="participants"><span>正式队伍</span><div>${approvedPlayers().filter(p => p.connected).slice(0,5).map(p => `<i title="${esc(p.teamName)}">${esc(p.teamName.slice(0,1))}</i>`).join("")}</div><b>${approvedPlayers().filter(p => p.connected).length} 队</b></div></aside></section></main>`;
+  root.innerHTML = `<main class="room-page">${pageHeader(true)}<div class="status ${status}"><i></i>${statusText}<span>第 ${room?.room.round || 1} 轮</span></div>${error ? `<div class="room-error">${esc(error)}</div>` : ""}
+  <section class="room-grid"><div class="stage">${host ? hostStage(status) : playerStage(status, myRank)}</div><aside>${host ? managementPanel() : ""}<div class="panel-head"><h2>本轮实时排名</h2><span>${room?.buzzes.length || 0} 队已抢答</span></div>
+  <div class="ranking">${ranking()}</div><div class="participants"><span>正式队伍</span><div>${approvedPlayers().filter(p => p.connected).slice(0,5).map(p => `<i title="${esc(p.teamName)}">${esc(p.teamName.slice(0,1))}</i>`).join("")}</div><b>${approvedPlayers().filter(p => p.connected).length} 队</b></div></aside></section>${historyOpen ? historyModal() : ""}</main>`;
   bindHeader();
   root.querySelectorAll("[data-action]").forEach(button => button.onclick = () => hostAction(button.dataset.action, button.dataset.participantId));
   root.querySelector("#buzzer")?.addEventListener("click", buzz);
+  root.querySelector("#history-close")?.addEventListener("click", closeHistory);
+  root.querySelector("#history-modal")?.addEventListener("click", event => { if (event.target.id === "history-modal") closeHistory(); });
 }
 
 const approvedPlayers = () => room.participants.filter(player => player.approvalStatus === "approved");
@@ -97,14 +100,16 @@ function managementPanel() {
   return `<section class="manage-panel"><div class="manage-title"><h2>成员审核</h2>${pending.length ? `<span>${pending.length} 个待处理</span>` : ""}</div><h3>待审核</h3>${pendingRows}<h3>正式队伍</h3>${approvedRows}</section>`;
 }
 
-function historyPanel() {
+function closeHistory() { historyOpen = false; render(); }
+
+function historyModal() {
   const history = savedHistory();
   const rows = history.length ? [...history].reverse().map(item => {
     const first = item.buzzes[0]?.buzzedAt;
     const results = item.buzzes.length ? item.buzzes.map((buzz, index) => `<li><b>${index + 1}</b><span>${esc(buzz.teamName)}</span><time>${index === 0 ? "第一名" : `+${((buzz.buzzedAt - first)/1000).toFixed(3)}s`}</time></li>`).join("") : '<p class="history-empty">本轮无人抢答</p>';
     return `<details class="history-round" ${item.round === history.at(-1)?.round ? "open" : ""}><summary><span>第 ${item.round} 轮</span><small>${item.buzzes.length} 队抢答</small></summary><ol>${results}</ol></details>`;
   }).join("") : '<p class="no-members">完成第一轮后，结果会保存在这里</p>';
-  return `<section class="history-panel"><div class="history-title"><h2>轮次记录</h2><span>${history.length} 轮</span></div>${rows}</section>`;
+  return `<div class="history-modal" id="history-modal"><section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-heading"><div class="history-dialog-head"><div><h2 id="history-heading">轮次记录</h2><span>共 ${history.length} 轮</span></div><button id="history-close" aria-label="关闭轮次记录">×</button></div><div class="history-dialog-body">${rows}</div></section></div>`;
 }
 
 function hostStage(status) {
@@ -138,7 +143,7 @@ socket.on("room-state", next => {
 socket.on("kicked", payload => { session = null; room = null; saveSession(); error = payload?.message || "你的队伍已被移出房间"; landing(); });
 socket.on("disconnect", () => { if (session) { error = "正在重新连接…"; render(); } });
 socket.on("connect", async () => { if (!session) return; try { const result = await emit("resume", session); room = result.state; error = ""; render(); } catch { session = null; room = null; saveSession(); landing(); } });
-window.addEventListener("keydown", event => { if (event.code === "Space" && session?.role === "player" && currentPlayer()?.approvalStatus === "approved" && room?.room.status === "open" && !["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName)) { event.preventDefault(); buzz(); } });
+window.addEventListener("keydown", event => { if (event.key === "Escape" && historyOpen) { closeHistory(); return; } if (event.code === "Space" && session?.role === "player" && currentPlayer()?.approvalStatus === "approved" && room?.room.status === "open" && !["INPUT","TEXTAREA","SELECT"].includes(event.target.tagName)) { event.preventDefault(); buzz(); } });
 try { session = JSON.parse(sessionStorage.getItem("buzzer-session")); } catch { session = null; }
 render();
 if (session && socket.connected) socket.emit("resume", session, result => { if (result?.ok) { room = result.state; error = ""; render(); } else { session = null; saveSession(); landing(); } });

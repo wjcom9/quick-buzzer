@@ -7,6 +7,14 @@ const logo = () => '<div class="logo" aria-label="极速抢答"><span>⚡</span>
 const emit = (event, payload) => new Promise((resolve, reject) => socket.emit(event, payload, response => response?.ok ? resolve(response) : reject(new Error(response?.error || "操作失败"))));
 function saveSession() { session ? sessionStorage.setItem("buzzer-session", JSON.stringify(session)) : sessionStorage.removeItem("buzzer-session"); }
 function showError(message) { error = message; render(); }
+function historyKey() { return `buzzer-history:${session?.code || "unknown"}`; }
+function savedHistory() { try { return JSON.parse(localStorage.getItem(historyKey()) || "[]"); } catch { return []; } }
+function syncHistory(nextRoom) {
+  if (!session || !nextRoom) return;
+  const merged = new Map(savedHistory().map(item => [item.round, item]));
+  for (const item of nextRoom.history || []) merged.set(item.round, item);
+  try { localStorage.setItem(historyKey(), JSON.stringify([...merged.values()].sort((a,b) => a.round - b.round))); } catch {}
+}
 function teamOptions() { return TEAM_NAMES.map((name, index) => `<label class="team-option"><input type="radio" name="teamName" value="${esc(name)}" ${index === 0 ? "required" : ""}><span>${esc(name)}</span></label>`).join(""); }
 
 function landing() {
@@ -59,7 +67,7 @@ function roomPage() {
   const myRank = host ? -1 : room.buzzes.findIndex(item => item.participantId === session.participantId);
   const statusText = status === "open" ? "抢答进行中" : status === "closed" ? "本轮已结束" : "等待主持人开始";
   root.innerHTML = `<main class="room-page">${pageHeader()}<div class="status ${status}"><i></i>${statusText}<span>第 ${room?.room.round || 1} 轮</span></div>${error ? `<div class="room-error">${esc(error)}</div>` : ""}
-  <section class="room-grid"><div class="stage">${host ? hostStage(status) : playerStage(status, myRank)}</div><aside>${host ? managementPanel() : ""}<div class="panel-head"><h2>实时排名</h2><span>${room?.buzzes.length || 0} 队已抢答</span></div>
+  <section class="room-grid"><div class="stage">${host ? hostStage(status) : playerStage(status, myRank)}</div><aside>${host ? managementPanel() : ""}${historyPanel()}<div class="panel-head"><h2>本轮实时排名</h2><span>${room?.buzzes.length || 0} 队已抢答</span></div>
   <div class="ranking">${ranking()}</div><div class="participants"><span>正式队伍</span><div>${approvedPlayers().filter(p => p.connected).slice(0,5).map(p => `<i title="${esc(p.teamName)}">${esc(p.teamName.slice(0,1))}</i>`).join("")}</div><b>${approvedPlayers().filter(p => p.connected).length} 队</b></div></aside></section></main>`;
   bindHeader();
   root.querySelectorAll("[data-action]").forEach(button => button.onclick = () => hostAction(button.dataset.action, button.dataset.participantId));
@@ -74,6 +82,16 @@ function managementPanel() {
   const pendingRows = pending.length ? pending.map(player => `<div class="member-row pending-row"><div><b>${esc(player.teamName)}</b><small>${player.connected ? "在线等待" : "暂时离线"}</small></div><div class="member-actions"><button class="approve" data-action="approve" data-participant-id="${player.id}">批准</button><button class="kick" data-action="kick" data-participant-id="${player.id}">移除</button></div></div>`).join("") : '<p class="no-members">暂无待审核队伍</p>';
   const approvedRows = approved.length ? approved.map(player => `<div class="member-row"><div><b>${esc(player.teamName)}</b><small>${player.connected ? "● 在线" : "○ 离线"}</small></div><button class="kick" data-action="kick" data-participant-id="${player.id}">踢出</button></div>`).join("") : '<p class="no-members">尚未批准队伍</p>';
   return `<section class="manage-panel"><div class="manage-title"><h2>成员审核</h2>${pending.length ? `<span>${pending.length} 个待处理</span>` : ""}</div><h3>待审核</h3>${pendingRows}<h3>正式队伍</h3>${approvedRows}</section>`;
+}
+
+function historyPanel() {
+  const history = savedHistory();
+  const rows = history.length ? [...history].reverse().map(item => {
+    const first = item.buzzes[0]?.buzzedAt;
+    const results = item.buzzes.length ? item.buzzes.map((buzz, index) => `<li><b>${index + 1}</b><span>${esc(buzz.teamName)}</span><time>${index === 0 ? "第一名" : `+${((buzz.buzzedAt - first)/1000).toFixed(3)}s`}</time></li>`).join("") : '<p class="history-empty">本轮无人抢答</p>';
+    return `<details class="history-round" ${item.round === history.at(-1)?.round ? "open" : ""}><summary><span>第 ${item.round} 轮</span><small>${item.buzzes.length} 队抢答</small></summary><ol>${results}</ol></details>`;
+  }).join("") : '<p class="no-members">完成第一轮后，结果会保存在这里</p>';
+  return `<section class="history-panel"><div class="history-title"><h2>轮次记录</h2><span>${history.length} 轮</span></div>${rows}</section>`;
 }
 
 function hostStage(status) {
@@ -96,7 +114,7 @@ function ranking() {
 
 async function hostAction(action, participantId) { try { const result = await emit("host-action", { action, participantId, code: session.code, token: session.token }); room = result.state; error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
 async function buzz() { try { const result = await emit("buzz", { code: session.code, token: session.token }); room = result.state; error = ""; roomPage(); } catch (reason) { showError(reason.message); } }
-function render() { session && room ? roomPage() : landing(); }
+function render() { if (session && room) { syncHistory(room); roomPage(); } else landing(); }
 
 socket.on("room-state", next => {
   const wasOpen = room?.room.status === "open"; room = next; error = "";
@@ -111,3 +129,4 @@ window.addEventListener("keydown", event => { if (event.code === "Space" && sess
 try { session = JSON.parse(sessionStorage.getItem("buzzer-session")); } catch { session = null; }
 render();
 if (session && socket.connected) socket.emit("resume", session, result => { if (result?.ok) { room = result.state; error = ""; render(); } else { session = null; saveSession(); landing(); } });
+setInterval(() => { if (session && socket.connected) socket.emit("keepalive", { code: session.code }, () => {}); }, 5 * 60 * 1000);

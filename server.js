@@ -18,7 +18,13 @@ const TEAM_NAMES = new Set([
 
 app.disable("x-powered-by");
 app.get("/health", (_req, res) => res.json({ ok: true, rooms: rooms.size }));
-app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h" }));
+app.use(express.static(path.join(__dirname, "public"), {
+  etag: true,
+  lastModified: true,
+  setHeaders(res, filePath) {
+    if (/\.(?:html|js|css)$/.test(filePath)) res.setHeader("Cache-Control", "no-cache, must-revalidate");
+  },
+}));
 
 function roomCode() {
   for (let attempt = 0; attempt < 10; attempt += 1) {

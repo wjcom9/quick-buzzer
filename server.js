@@ -11,6 +11,10 @@ const io = new Server(server, { cors: { origin: false }, pingTimeout: 12000, pin
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rooms = new Map();
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const TEAM_NAMES = new Set([
+  "南万党支部先锋一队", "南万党支部先锋二队", "南万党支部先锋三队", "南万党支部先锋四队", "南万党支部先锋五队",
+  "南万党支部先锋六队", "南万党支部先锋七队", "柳万党支部队", "桂万党支部队",
+]);
 
 app.disable("x-powered-by");
 app.get("/health", (_req, res) => res.json({ ok: true, rooms: rooms.size }));
@@ -32,14 +36,18 @@ const channel = code => `room:${code}`;
 function state(room) {
   return {
     room: { code: room.code, status: room.status, round: room.round, createdAt: room.createdAt },
-    participants: [...room.participants.values()].map(({ id, name, joinedAt, connected }) => ({ id, name, joinedAt, connected })),
-    buzzes: room.buzzes.map(({ participantId, name, buzzedAt }) => ({ participantId, name, buzzedAt })),
+    participants: [...room.participants.values()].map(({ id, teamName, joinedAt, connected, approvalStatus }) => ({ id, teamName, joinedAt, connected, approvalStatus })),
+    buzzes: room.buzzes.map(({ participantId, teamName, buzzedAt }) => ({ participantId, teamName, buzzedAt })),
   };
 }
 
 function emitState(room) { io.to(channel(room.code)).emit("room-state", state(room)); }
 function fail(ack, error) { ack?.({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
-function hostFor(room, token) { return token && crypto.timingSafeEqual(Buffer.from(room.hostToken), Buffer.from(String(token).padEnd(room.hostToken.length).slice(0, room.hostToken.length))); }
+function hostFor(room, token) {
+  if (!token) return false;
+  const supplied = Buffer.from(String(token).padEnd(room.hostToken.length).slice(0, room.hostToken.length));
+  return crypto.timingSafeEqual(Buffer.from(room.hostToken), supplied);
+}
 function playerFor(room, token) { return [...room.participants.values()].find(player => player.token === token); }
 
 io.on("connection", socket => {
@@ -61,16 +69,19 @@ io.on("connection", socket => {
     try {
       const code = String(payload.code || "").trim().toUpperCase();
       const password = String(payload.password || "");
-      const name = String(payload.name || "").trim().replace(/\s+/g, " ");
+      const teamName = String(payload.teamName || "").trim();
       const room = rooms.get(code);
       if (!room) throw new Error("找不到这个房间");
       if (room.passwordHash !== hashPassword(password)) throw new Error("房间密码不正确");
-      if (name.length < 2 || name.length > 20) throw new Error("请填写 2–20 个字符的真实姓名");
-      if ([...room.participants.values()].some(player => player.name === name && player.connected)) throw new Error("该姓名已在房间中");
-      const participant = { id: room.nextParticipantId++, name, token: makeToken(), joinedAt: Date.now(), connected: true, socketId: socket.id };
+      if (!TEAM_NAMES.has(teamName)) throw new Error("请选择有效的队名");
+      if ([...room.participants.values()].some(player => player.teamName === teamName)) throw new Error("该队伍已经申请加入房间");
+      const participant = {
+        id: room.nextParticipantId++, teamName, token: makeToken(), joinedAt: Date.now(), connected: true,
+        socketId: socket.id, approvalStatus: "pending",
+      };
       room.participants.set(participant.id, participant); socket.join(channel(code));
       socket.data.session = { code, role: "player", token: participant.token, participantId: participant.id };
-      ack?.({ ok: true, code, name, playerToken: participant.token, participantId: participant.id, state: state(room) });
+      ack?.({ ok: true, code, teamName, playerToken: participant.token, participantId: participant.id, state: state(room) });
       emitState(room);
     } catch (error) { fail(ack, error); }
   });
@@ -95,8 +106,23 @@ io.on("connection", socket => {
     try {
       const room = rooms.get(String(payload.code || "").toUpperCase());
       if (!room || !hostFor(room, payload.token)) throw new Error("仅主持人可以执行此操作");
-      if (payload.action === "start") { if (room.status !== "waiting") room.round += 1; room.buzzes = []; room.status = "open"; }
-      else if (payload.action === "close") room.status = "closed";
+      if (payload.action === "approve" || payload.action === "kick") {
+        const participant = room.participants.get(Number(payload.participantId));
+        if (!participant) throw new Error("该队伍已离开房间");
+        if (payload.action === "approve") participant.approvalStatus = "approved";
+        else {
+          room.participants.delete(participant.id);
+          room.buzzes = room.buzzes.filter(item => item.participantId !== participant.id);
+          if (participant.socketId) {
+            io.to(participant.socketId).emit("kicked", { message: "主持人已将你的队伍移出房间" });
+            io.sockets.sockets.get(participant.socketId)?.leave(channel(room.code));
+          }
+        }
+      } else if (payload.action === "start") {
+        const approvedOnline = [...room.participants.values()].some(player => player.approvalStatus === "approved" && player.connected);
+        if (!approvedOnline) throw new Error("请先批准至少一支在线队伍");
+        if (room.status !== "waiting") room.round += 1; room.buzzes = []; room.status = "open";
+      } else if (payload.action === "close") room.status = "closed";
       else if (payload.action === "reset") { room.round += 1; room.buzzes = []; room.status = "waiting"; }
       else throw new Error("未知操作");
       emitState(room); ack?.({ ok: true, state: state(room) });
@@ -108,9 +134,10 @@ io.on("connection", socket => {
       const room = rooms.get(String(payload.code || "").toUpperCase());
       const player = room && playerFor(room, payload.token);
       if (!room || !player) throw new Error("身份已失效，请重新加入");
+      if (player.approvalStatus !== "approved") throw new Error("请等待主持人批准加入");
       if (room.status !== "open") throw new Error("当前不在抢答时间");
       if (!room.buzzes.some(item => item.participantId === player.id)) {
-        room.buzzes.push({ participantId: player.id, name: player.name, buzzedAt: Date.now() });
+        room.buzzes.push({ participantId: player.id, teamName: player.teamName, buzzedAt: Date.now() });
       }
       emitState(room); ack?.({ ok: true, state: state(room) });
     } catch (error) { fail(ack, error); }

@@ -15,8 +15,29 @@
 - 手机震动提示、电脑空格键抢答
 - 断线后 2 分钟内自动恢复身份
 
+## 技术栈
+
+- **后端**：Node.js（>= 20）+ Express + Socket.IO
+- **前端**：原生 HTML / CSS / JavaScript，无需构建步骤
+- **部署**：Render（见 `render.yaml`）
+
+## 本地运行
+
+```bash
+# 安装依赖
+npm install
+
+# 启动服务，默认端口 3000
+npm start
+
+# 运行测试
+npm test
+```
+
+启动后浏览器访问 `http://localhost:3000` 即可使用，也可通过 `PORT` 环境变量指定端口。
+
 ## Render 部署
 
 Render 连接 `wjcom9/quick-buzzer`，Build Command 使用 `npm install`，Start Command 使用 `npm start`。推送到 `main` 后会自动部署。
 
-房间数据保存在服务内存中，适合临时活动。Render 服务重启后房间会被清空；建议活动开始前提前打开网页。
+> 房间数据保存在服务内存中，适合临时活动。Render 服务重启后房间会被清空；建议活动开始前提前打开网页。
